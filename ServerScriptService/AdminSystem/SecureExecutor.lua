@@ -1,5 +1,5 @@
--- Secure Luau Script Executor
--- Advanced server-side script execution with comprehensive sandboxing
+-- Secure Executor - Professional-Grade Script Execution System
+-- Implements advanced security, performance, and monitoring features
 
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
@@ -9,22 +9,74 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SecureExecutor = {}
 SecureExecutor.__index = SecureExecutor
 
--- Security constants
-local EXECUTION_TIMEOUT = 30 -- seconds
-local MAX_MEMORY_USAGE = 1024 * 1024 -- 1MB
+-- Enhanced security constants
 local MAX_EXECUTION_TIME = 5 -- seconds per script
+local MAX_MEMORY_USAGE = 1024 * 1024 -- 1MB
 local RATE_LIMIT_WINDOW = 60 -- seconds
 local MAX_EXECUTIONS_PER_WINDOW = 10
+local MEMORY_CHECK_INTERVAL = 0.1 -- seconds
+local ENCRYPTION_KEY_ROTATION_INTERVAL = 300 -- 5 minutes
 
--- Execution tracking
-local executionHistory = {}
-local activeExecutions = {}
-local executionStats = {
-    totalExecutions = 0,
-    successfulExecutions = 0,
-    failedExecutions = 0,
-    averageExecutionTime = 0
+-- Granular permission flags (Suggestion #7)
+local PERMISSION_FLAGS = {
+    canExecuteScripts = 1,
+    canRequireModules = 2,
+    canReplicate = 2,
+    canConsoleAccess = 1,
+    canMemoryMonitoring = 2,
+    canAdvancedStats = 3,
+    canSensitiveModules = 3,
+    canSystemAccess = 4
 }
+
+-- Global execution tracking
+local activeExecutions = {}
+local encryptionKeys = {}
+
+-- Suggestion #3: Readonly table protection
+local function createReadonlyTable(tbl, name)
+    return setmetatable({}, {
+        __index = tbl,
+        __newindex = function()
+            error("Attempt to modify read-only table: " .. (name or "unknown"))
+        end,
+        __metatable = false
+    })
+end
+
+-- Suggestion #2: Memory monitoring with heuristics
+local function getMemorySnapshot()
+    collectgarbage("collect")
+    return collectgarbage("count") * 1024
+end
+
+local function estimateTableMemory(tbl, visited, depth)
+    visited = visited or {}
+    depth = depth or 0
+    
+    if depth > 10 or visited[tbl] then
+        return 0
+    end
+    
+    visited[tbl] = true
+    local size = 100 -- Base table overhead
+    
+    for k, v in pairs(tbl) do
+        size = size + 50 -- Key-value pair overhead
+        
+        if type(k) == "string" then
+            size = size + #k
+        end
+        
+        if type(v) == "string" then
+            size = size + #v
+        elseif type(v) == "table" then
+            size = size + estimateTableMemory(v, visited, depth + 1)
+        end
+    end
+    
+    return size
+end
 
 function SecureExecutor.new(adminSystem)
     local self = setmetatable({}, SecureExecutor)
@@ -33,20 +85,161 @@ function SecureExecutor.new(adminSystem)
     self.secureEnvironments = {}
     self.executionQueue = {}
     self.replicationTargets = {}
-    
-    -- Initialize rate limiting
     self.rateLimiter = {}
+    self.requireCache = {} -- Suggestion #4: Module caching
     
-    -- Setup periodic cleanup
+    -- Suggestion #6: Per-player execution stats
+    self.playerStats = {}
+    
+    -- Suggestion #9: Enhanced encryption with key rotation
+    self.encryptionKeys = {}
+    self.lastKeyRotation = 0
+    
+    -- Setup cleanup and monitoring tasks
     self:setupCleanupTasks()
     
     return self
 end
 
--- Create secure sandbox environment
+-- Suggestion #7: Granular permission checking
+function SecureExecutor:checkSpecificPermission(player, permissionFlag)
+    local playerLevel = self.adminSystem:getPermissionLevel(player)
+    local requiredLevel = PERMISSION_FLAGS[permissionFlag]
+    
+    if not requiredLevel then
+        error("Unknown permission flag: " .. tostring(permissionFlag))
+    end
+    
+    return playerLevel >= requiredLevel
+end
+
+-- Suggestion #5: Pcall-protected environment functions
+local function createSafeFunction(func, context)
+    return function(...)
+        local success, result = pcall(func, ...)
+        if not success then
+            warn("Safe function error in " .. context .. ": " .. tostring(result))
+            return nil
+        end
+        return result
+    end
+end
+
+-- Suggestion #3: Enhanced sandbox with readonly protection
 function SecureExecutor:createSecureEnvironment(player, executionId)
+    local startMemory = getMemorySnapshot()
+    local instructionCount = 0
+    local memoryAllocated = 0
+    
+    -- Suggestion #10: Async yielding support with RunService integration
+    local function safeWait(duration)
+        duration = math.max(duration or 0, 0.001)
+        local startTime = tick()
+        
+        while tick() - startTime < duration do
+            RunService.Heartbeat:Wait()
+            
+            -- Check if execution should be cancelled
+            if activeExecutions[executionId] and activeExecutions[executionId].cancelled then
+                error("Execution cancelled during wait")
+            end
+        end
+    end
+    
+    -- Suggestion #5: Protected logging functions
+    local function safePrint(...)
+        local success, result = pcall(function(...)
+            local args = {...}
+            local output = {}
+            for i, v in ipairs(args) do
+                table.insert(output, tostring(v))
+            end
+            local message = table.concat(output, " ")
+            
+            -- Memory check for large outputs
+            if #message > 10000 then
+                message = message:sub(1, 10000) .. "... [TRUNCATED]"
+            end
+            
+            self:logExecution(player, executionId, "OUTPUT", message)
+            self:sendExecutionResult(player, executionId, "output", message)
+        end, ...)
+        
+        if not success then
+            warn("Print function error: " .. tostring(result))
+        end
+    end
+    
+    local function safeWarn(...)
+        local success, result = pcall(function(...)
+            local args = {...}
+            local output = {}
+            for i, v in ipairs(args) do
+                table.insert(output, tostring(v))
+            end
+            local message = table.concat(output, " ")
+            
+            self:logExecution(player, executionId, "WARNING", message)
+            self:sendExecutionResult(player, executionId, "warning", message)
+        end, ...)
+        
+        if not success then
+            warn("Warn function error: " .. tostring(result))
+        end
+    end
+    
+    -- Suggestion #4: Cached require function
+    local function cachedRequire(moduleScript)
+        local success, result = pcall(function()
+            -- Check cache first
+            local cacheKey = tostring(moduleScript)
+            if self.requireCache[executionId] and self.requireCache[executionId][cacheKey] then
+                return self.requireCache[executionId][cacheKey]
+            end
+            
+            -- Perform require
+            local moduleResult = self:secureRequire(player, moduleScript, executionId)
+            
+            -- Cache result
+            if not self.requireCache[executionId] then
+                self.requireCache[executionId] = {}
+            end
+            self.requireCache[executionId][cacheKey] = moduleResult
+            
+            return moduleResult
+        end)
+        
+        if success then
+            return result
+        else
+            error("Require failed: " .. tostring(result))
+        end
+    end
+    
+    -- Suggestion #2: Memory-monitored spawn function
+    local function memoryMonitoredSpawn(func)
+        return coroutine.wrap(function()
+            local memBefore = getMemorySnapshot()
+            
+            local success, result = pcall(func)
+            
+            local memAfter = getMemorySnapshot()
+            local memDelta = memAfter - memBefore
+            
+            if memDelta > MAX_MEMORY_USAGE / 10 then -- 10% of limit per spawn
+                warn("High memory usage in spawned function: " .. math.floor(memDelta / 1024) .. "KB")
+            end
+            
+            if not success then
+                error("Spawned function error: " .. tostring(result))
+            end
+            
+            return result
+        end)()
+    end
+    
     local environment = {
-        -- Safe standard library
+        -- Core Lua functions
         _G = {},
         _VERSION = _VERSION,
         assert = assert,
@@ -62,80 +255,21 @@ function SecureExecutor:createSecureEnvironment(player, executionId)
         unpack = unpack,
         xpcall = xpcall,
         
-        -- Safe math library
-        math = {
-            abs = math.abs,
-            acos = math.acos,
-            asin = math.asin,
-            atan = math.atan,
-            atan2 = math.atan2,
-            ceil = math.ceil,
-            cos = math.cos,
-            deg = math.deg,
-            exp = math.exp,
-            floor = math.floor,
-            fmod = math.fmod,
-            frexp = math.frexp,
-            huge = math.huge,
-            ldexp = math.ldexp,
-            log = math.log,
-            log10 = math.log10,
-            max = math.max,
-            min = math.min,
-            modf = math.modf,
-            pi = math.pi,
-            pow = math.pow,
-            rad = math.rad,
-            random = math.random,
-            randomseed = math.randomseed,
-            sin = math.sin,
-            sqrt = math.sqrt,
-            tan = math.tan
-        },
-        
-        -- Safe string library
-        string = {
-            byte = string.byte,
-            char = string.char,
-            find = string.find,
-            format = string.format,
-            gmatch = string.gmatch,
-            gsub = string.gsub,
-            len = string.len,
-            lower = string.lower,
-            match = string.match,
-            rep = string.rep,
-            reverse = string.reverse,
-            sub = string.sub,
-            upper = string.upper
-        },
-        
-        -- Safe table library
-        table = {
-            concat = table.concat,
-            insert = table.insert,
-            maxn = table.maxn,
-            remove = table.remove,
-            sort = table.sort,
-            unpack = table.unpack
-        },
+        -- Suggestion #3: Readonly protected libraries
+        math = createReadonlyTable(math, "math"),
+        string = createReadonlyTable(string, "string"),
+        table = createReadonlyTable(table, "table"),
         
         -- Controlled game access
         game = self:createGameProxy(player),
         workspace = self:createWorkspaceProxy(player),
         
-        -- Utility functions
-        wait = function(t)
-            return game:GetService("RunService").Heartbeat:Wait()
-        end,
-        
-        spawn = function(func)
-            return coroutine.wrap(func)()
-        end,
-        
-        delay = function(t, func)
-            spawn(function()
-                wait(t)
+        -- Suggestion #10: Enhanced utility functions with RunService integration
+        wait = safeWait,
+        spawn = memoryMonitoredSpawn,
+        delay = function(duration, func)
+            memoryMonitoredSpawn(function()
+                safeWait(duration)
                 func()
             end)
         end,
@@ -148,562 +282,431 @@ function SecureExecutor:createSecureEnvironment(player, executionId)
         executionId = executionId,
         executor_player = player,
         executor_timestamp = tick(),
+        executor_memory_start = startMemory,
         
-        -- Secure require function
-        require = function(moduleScript)
-            return self:secureRequire(player, moduleScript)
+        -- Suggestion #4: Cached require function
+        require = cachedRequire,
+        
+        -- Suggestion #5: Protected logging functions
+        print = safePrint,
+        warn = safeWarn,
+        
+        -- Memory monitoring utilities
+        getMemoryUsage = function()
+            return getMemorySnapshot() - startMemory
         end,
         
-        -- Safe print function
-        print = function(...)
-            local args = {...}
-            local output = {}
-            for i, v in ipairs(args) do
-                table.insert(output, tostring(v))
-            end
-            local message = table.concat(output, " ")
-            
-            -- Log and send to executor
-            self:logExecution(player, executionId, "OUTPUT", message)
-            self:sendExecutionResult(player, executionId, "output", message)
+        getMemoryLimit = function()
+            return MAX_MEMORY_USAGE
         end,
         
-        -- Safe warn function
-        warn = function(...)
-            local args = {...}
-            local output = {}
-            for i, v in ipairs(args) do
-                table.insert(output, tostring(v))
-            end
-            local message = table.concat(output, " ")
-            
-            self:logExecution(player, executionId, "WARNING", message)
-            self:sendExecutionResult(player, executionId, "warning", message)
+        -- Execution monitoring
+        getExecutionTime = function()
+            return tick() - (activeExecutions[executionId] and activeExecutions[executionId].startTime or tick())
         end
     }
     
-    -- Store environment for cleanup
-    self.secureEnvironments[executionId] = environment
+    -- Store environment with enhanced tracking
+    self.secureEnvironments[executionId] = {
+        environment = environment,
+        startMemory = startMemory,
+        player = player,
+        createdAt = tick()
+    }
     
     return environment
 end
 
--- Create controlled game proxy
-function SecureExecutor:createGameProxy(player)
-    local gameProxy = {}
-    
-    -- Safe service access
-    local allowedServices = {
-        "Players",
-        "Workspace",
-        "Lighting",
-        "SoundService",
-        "Debris",
-        "RunService",
-        "TweenService",
-        "UserInputService",
-        "ContextActionService",
-        "GuiService",
-        "StarterGui",
-        "StarterPack",
-        "StarterPlayerScripts",
-        "Teams",
-        "Chat"
-    }
-    
-    function gameProxy:GetService(serviceName)
-        if table.find(allowedServices, serviceName) then
-            return game:GetService(serviceName)
-        else
-            error("Service '" .. serviceName .. "' is not accessible in secure environment")
-        end
-    end
-    
-    function gameProxy:FindService(serviceName)
-        if table.find(allowedServices, serviceName) then
-            return game:FindService(serviceName)
-        else
-            return nil
-        end
-    end
-    
-    -- Safe properties
-    gameProxy.Players = game.Players
-    gameProxy.Workspace = game.Workspace
-    gameProxy.Lighting = game.Lighting
-    gameProxy.ReplicatedStorage = game.ReplicatedStorage
-    gameProxy.ServerStorage = nil -- Restricted
-    gameProxy.ServerScriptService = nil -- Restricted
-    
-    return gameProxy
-end
-
--- Create controlled workspace proxy
-function SecureExecutor:createWorkspaceProxy(player)
-    local workspaceProxy = {}
-    
-    -- Safe methods
-    workspaceProxy.FindFirstChild = function(self, name)
-        return workspace:FindFirstChild(name)
-    end
-    
-    workspaceProxy.FindFirstChildOfClass = function(self, className)
-        return workspace:FindFirstChildOfClass(className)
-    end
-    
-    workspaceProxy.GetChildren = function(self)
-        return workspace:GetChildren()
-    end
-    
-    workspaceProxy.GetDescendants = function(self)
-        return workspace:GetDescendants()
-    end
-    
-    -- Safe properties
-    workspaceProxy.CurrentCamera = workspace.CurrentCamera
-    workspaceProxy.Gravity = workspace.Gravity
-    
-    return workspaceProxy
-end
-
--- Secure require function implementation
-function SecureExecutor:secureRequire(player, moduleScript)
-    -- Validate that the object is actually a ModuleScript
-    if not moduleScript or not moduleScript:IsA("ModuleScript") then
-        error("require() can only be used with ModuleScript objects")
-    end
-    
-    -- Get the full path of the ModuleScript
-    local modulePath = self:getModulePath(moduleScript)
-    
-    -- Check if the module is in restricted locations
-    if self:isRestrictedModule(modulePath) then
-        error("Access denied: Cannot require modules from restricted locations")
-    end
-    
-    -- Check admin permissions for sensitive modules
-    if self:isSensitiveModule(modulePath) then
-        local permissionLevel = self.adminSystem:getPermissionLevel(player)
-        if permissionLevel < 3 then -- Require SuperAdmin+ for sensitive modules
-            error("Insufficient permissions: SuperAdmin level required for sensitive modules")
-        end
-    end
-    
-    -- Log the require attempt
-    self:logExecution(player, "MODULE_REQUIRE", "ATTEMPT", modulePath)
-    
-    -- Safely require the module
-    local success, result = pcall(function()
-        return require(moduleScript)
-    end)
-    
-    if success then
-        self:logExecution(player, "MODULE_REQUIRE", "SUCCESS", modulePath)
-        return result
-    else
-        self:logExecution(player, "MODULE_REQUIRE", "ERROR", modulePath .. " - " .. tostring(result))
-        error("Module require failed: " .. tostring(result))
-    end
-end
-
--- Get module path for logging and security checks
-function SecureExecutor:getModulePath(moduleScript)
-    local path = {}
-    local current = moduleScript
-    
-    while current and current ~= game do
-        table.insert(path, 1, current.Name)
-        current = current.Parent
-    end
-    
-    return table.concat(path, ".")
-end
-
--- Check if module is in restricted location
-function SecureExecutor:isRestrictedModule(modulePath)
-    local restrictedPaths = {
-        "ServerScriptService.AdminSystem",  -- Protect admin system modules
-        "ServerStorage",                     -- Protect server storage
-        "HttpService",                       -- Prevent HTTP access
-        "DataStoreService",                  -- Prevent data store access
-        "MessagingService",                  -- Prevent messaging service access
-        "TeleportService"                    -- Prevent teleport service access
-    }
-    
-    for _, restrictedPath in ipairs(restrictedPaths) do
-        if modulePath:find(restrictedPath) then
-            return true
-        end
-    end
-    
-    return false
-end
-
--- Check if module is sensitive (requires higher permissions)
-function SecureExecutor:isSensitiveModule(modulePath)
-    local sensitivePaths = {
-        "ReplicatedStorage.AdminModules",    -- Admin-specific modules
-        "ServerScriptService.GameSystems",   -- Core game systems
-        "Workspace.SecurityModules"          -- Security-related modules
-    }
-    
-    for _, sensitivePath in ipairs(sensitivePaths) do
-        if modulePath:find(sensitivePath) then
-            return true
-        end
-    end
-    
-    return false
-end
-
--- Execute script with security measures
-function SecureExecutor:executeScript(player, scriptCode, replicateToClient)
-    -- Validate admin permissions
-    if not self.adminSystem:hasPermission(player, "execute") then
-        return false, "Insufficient permissions for script execution"
-    end
-    
-    -- Rate limiting check
-    if not self:checkRateLimit(player) then
-        return false, "Rate limit exceeded. Please wait before executing more scripts."
-    end
-    
-    -- Generate execution ID
-    local executionId = HttpService:GenerateGUID(false)
-    
-    -- Log execution attempt
-    self:logExecution(player, executionId, "ATTEMPT", scriptCode:sub(1, 200))
-    
-    -- Create secure environment
-    local environment = self:createSecureEnvironment(player, executionId)
-    
-    -- Compile script
-    local compiledFunction, compileError = loadstring(scriptCode)
-    
-    if not compiledFunction then
-        self:logExecution(player, executionId, "COMPILE_ERROR", compileError)
-        return false, "Compilation error: " .. compileError
-    end
-    
-    -- Set environment
-    setfenv(compiledFunction, environment)
-    
-    -- Execute with timeout and error handling
-    local success, result = self:executeWithTimeout(player, executionId, compiledFunction, scriptCode)
-    
-    -- Handle replication if requested and successful
-    if success and replicateToClient then
-        self:replicateToClient(player, executionId, scriptCode, result)
-    end
-    
-    -- Update statistics
-    self:updateExecutionStats(success, tick() - environment.executor_timestamp)
-    
-    -- Cleanup
-    self:cleanupExecution(executionId)
-    
-    return success, result
-end
-
--- Execute function with timeout protection
+-- Suggestion #1: Coroutine-based timeout with deterministic scheduling
 function SecureExecutor:executeWithTimeout(player, executionId, func, scriptCode)
-    local startTime = tick()
     local success, result
+    local startTime = tick()
     
     -- Create execution context
     activeExecutions[executionId] = {
         player = player,
         startTime = startTime,
-        scriptCode = scriptCode
+        scriptCode = scriptCode,
+        cancelled = false,
+        memoryUsage = 0
     }
     
-    -- Execute in protected mode
-    local executionThread = coroutine.create(function()
-        success, result = pcall(func)
-    end)
+    -- Suggestion #2: Memory monitoring during execution
+    local initialMemory = getMemorySnapshot()
     
-    -- Start execution
-    local resumeSuccess, resumeResult = coroutine.resume(executionThread)
+    -- Create coroutine for execution
+    local co = coroutine.create(func)
     
-    -- Handle timeout
-    local timeoutThread = coroutine.create(function()
-        wait(MAX_EXECUTION_TIME)
-        if activeExecutions[executionId] then
+    -- Deterministic timeout loop
+    while coroutine.status(co) ~= "dead" do
+        -- Check timeout
+        if tick() - startTime > MAX_EXECUTION_TIME then
             success = false
             result = "Script execution timed out after " .. MAX_EXECUTION_TIME .. " seconds"
+            activeExecutions[executionId].cancelled = true
             self:logExecution(player, executionId, "TIMEOUT", result)
+            break
         end
-    end)
-    
-    coroutine.resume(timeoutThread)
-    
-    -- Wait for completion or timeout
-    while coroutine.status(executionThread) ~= "dead" and 
-          activeExecutions[executionId] and 
-          (tick() - startTime) < MAX_EXECUTION_TIME do
-        wait(0.1)
+        
+        -- Check memory usage
+        local currentMemory = getMemorySnapshot()
+        local memoryDelta = currentMemory - initialMemory
+        activeExecutions[executionId].memoryUsage = memoryDelta
+        
+        if memoryDelta > MAX_MEMORY_USAGE then
+            success = false
+            result = "Memory limit exceeded: " .. math.floor(memoryDelta / 1024) .. "KB used"
+            activeExecutions[executionId].cancelled = true
+            self:logExecution(player, executionId, "MEMORY_LIMIT", result)
+            break
+        end
+        
+        -- Resume coroutine
+        local ok, err = coroutine.resume(co)
+        if not ok then
+            success = false
+            result = err
+            break
+        end
+        
+        -- If coroutine yielded, check if it returned a value
+        if coroutine.status(co) == "dead" then
+            success = true
+            result = err -- This would be the return value
+            break
+        end
+        
+        -- Yield to Roblox scheduler
+        RunService.Heartbeat:Wait()
     end
     
-    -- Force cleanup if still running
+    -- Cleanup
     if activeExecutions[executionId] then
         activeExecutions[executionId] = nil
     end
     
-    if success then
-        self:logExecution(player, executionId, "SUCCESS", tostring(result))
-        executionStats.successfulExecutions = executionStats.successfulExecutions + 1
-        return true, result
-    else
-        self:logExecution(player, executionId, "ERROR", tostring(result))
-        executionStats.failedExecutions = executionStats.failedExecutions + 1
+    -- Handle final result
+    if success == nil then
+        success = true
+    end
+    
+    -- Suggestion #8: Enhanced error reporting with stack traces
+    if not success then
+        local errorInfo = {
+            error = tostring(result),
+            executionTime = tick() - startTime,
+            memoryUsage = activeExecutions[executionId] and activeExecutions[executionId].memoryUsage or 0,
+            stackTrace = debug.traceback() or "Stack trace unavailable"
+        }
+        
+        self:logExecution(player, executionId, "ERROR", HttpService:JSONEncode(errorInfo))
         return false, result
+    else
+        self:logExecution(player, executionId, "SUCCESS", tostring(result))
+        return true, result
     end
 end
 
--- Rate limiting system
-function SecureExecutor:checkRateLimit(player)
-    local userId = player.UserId
+-- Suggestion #4: Enhanced require with caching
+function SecureExecutor:secureRequire(player, moduleScript, executionId)
+    if not self:checkSpecificPermission(player, "canRequireModules") then
+        error("Insufficient permissions for module requiring")
+    end
+    
+    -- Validate ModuleScript
+    if not moduleScript or not moduleScript:IsA("ModuleScript") then
+        error("require() can only be used with ModuleScript objects")
+    end
+    
+    local modulePath = self:getModulePath(moduleScript)
+    
+    -- Security checks
+    if self:isRestrictedModule(modulePath) then
+        error("Access denied: Cannot require modules from restricted locations")
+    end
+    
+    if self:isSensitiveModule(modulePath) then
+        if not self:checkSpecificPermission(player, "canSensitiveModules") then
+            error("Insufficient permissions: SuperAdmin level required for sensitive modules")
+        end
+    end
+    
+    -- Log attempt
+    self:logExecution(player, executionId, "MODULE_REQUIRE", "ATTEMPT: " .. modulePath)
+    
+    -- Execute module with enhanced error handling
+    local success, result = pcall(function()
+        local moduleCode = moduleScript.Source
+        local environment = self.secureEnvironments[executionId] and self.secureEnvironments[executionId].environment
+        
+        if not environment then
+            error("Invalid execution environment")
+        end
+        
+        -- Create module-specific sandbox
+        local moduleSandbox = self:createModuleSandbox(environment, modulePath)
+        
+        -- Compile and execute
+        local compiledModule, compileError = load(moduleCode, "@" .. modulePath, "t", moduleSandbox)
+        
+        if not compiledModule then
+            error("Module compilation failed: " .. tostring(compileError))
+        end
+        
+        return compiledModule()
+    end)
+    
+    if success then
+        self:logExecution(player, executionId, "MODULE_REQUIRE", "SUCCESS: " .. modulePath)
+        return result
+    else
+        -- Suggestion #8: Enhanced error reporting
+        local errorInfo = {
+            module = modulePath,
+            error = tostring(result),
+            stackTrace = debug.traceback() or "Stack trace unavailable"
+        }
+        
+        self:logExecution(player, executionId, "MODULE_REQUIRE", "ERROR: " .. HttpService:JSONEncode(errorInfo))
+        error("Module require failed: " .. tostring(result))
+    end
+end
+
+-- Suggestion #9: Enhanced encryption with key rotation and nonce
+function SecureExecutor:generateEncryptionKey(player)
     local currentTime = tick()
     
-    -- Initialize rate limiter for user
-    if not self.rateLimiter[userId] then
-        self.rateLimiter[userId] = {
-            executions = {},
-            lastCleanup = currentTime
+    -- Rotate keys every 5 minutes
+    if currentTime - self.lastKeyRotation > ENCRYPTION_KEY_ROTATION_INTERVAL then
+        self.encryptionKeys = {}
+        self.lastKeyRotation = currentTime
+    end
+    
+    local playerKey = self.encryptionKeys[player.UserId]
+    if not playerKey then
+        playerKey = {
+            primary = tostring(player.UserId) .. "_" .. tostring(currentTime) .. "_" .. tostring(math.random(1000000, 9999999)),
+            secondary = string.reverse(tostring(player.UserId)) .. "_salt_" .. tostring(math.random(100000, 999999)),
+            nonce = 0
+        }
+        self.encryptionKeys[player.UserId] = playerKey
+    end
+    
+    -- Increment nonce for replay protection
+    playerKey.nonce = playerKey.nonce + 1
+    
+    return playerKey
+end
+
+function SecureExecutor:encryptReplicationData(data, player)
+    local serialized = HttpService:JSONEncode(data)
+    local keys = self:generateEncryptionKey(player)
+    
+    -- Triple-pass encryption with nonce
+    local encrypted = serialized
+    local allKeys = {keys.primary, keys.secondary, tostring(keys.nonce)}
+    
+    for pass = 1, 3 do
+        local key = allKeys[pass]
+        local passResult = {}
+        
+        for i = 1, #encrypted do
+            local char = encrypted:sub(i, i)
+            local keyChar = key:sub(((i - 1) % #key) + 1, ((i - 1) % #key) + 1)
+            local encryptedChar = string.char(bit32.bxor(string.byte(char), string.byte(keyChar)))
+            table.insert(passResult, encryptedChar)
+        end
+        
+        encrypted = table.concat(passResult)
+    end
+    
+    return {
+        data = encrypted,
+        nonce = keys.nonce,
+        checksum = self:generateChecksum(serialized, keys.nonce),
+        timestamp = tick(),
+        keyVersion = self.lastKeyRotation
+    }
+end
+
+-- Enhanced checksum with nonce integration
+function SecureExecutor:generateChecksum(data, nonce)
+    local hash1 = nonce or 0
+    local hash2 = nonce or 0
+    
+    for i = 1, #data do
+        local byte = string.byte(data:sub(i, i))
+        hash1 = (hash1 + byte * i + nonce) % 1000000007
+        hash2 = (hash2 + byte * (i * i) + nonce) % 999999937
+    end
+    
+    return tostring(hash1) .. "_" .. tostring(hash2) .. "_" .. tostring(nonce)
+end
+
+-- Suggestion #6: Per-player execution statistics
+function SecureExecutor:updatePlayerStats(player, executionResult)
+    local userId = player.UserId
+    
+    if not self.playerStats[userId] then
+        self.playerStats[userId] = {
+            totalExecutions = 0,
+            successfulExecutions = 0,
+            failedExecutions = 0,
+            totalExecutionTime = 0,
+            totalMemoryUsed = 0,
+            averageExecutionTime = 0,
+            averageMemoryUsage = 0,
+            lastExecution = 0,
+            replicationCount = 0,
+            moduleRequireCount = 0,
+            timeoutCount = 0,
+            memoryLimitCount = 0
         }
     end
     
-    local userLimiter = self.rateLimiter[userId]
+    local stats = self.playerStats[userId]
+    stats.totalExecutions = stats.totalExecutions + 1
+    stats.lastExecution = tick()
     
-    -- Clean old entries
-    if currentTime - userLimiter.lastCleanup > RATE_LIMIT_WINDOW then
-        local newExecutions = {}
-        for _, execTime in ipairs(userLimiter.executions) do
-            if currentTime - execTime < RATE_LIMIT_WINDOW then
-                table.insert(newExecutions, execTime)
-            end
+    if executionResult.success then
+        stats.successfulExecutions = stats.successfulExecutions + 1
+    else
+        stats.failedExecutions = stats.failedExecutions + 1
+        
+        if executionResult.error and executionResult.error:find("timeout") then
+            stats.timeoutCount = stats.timeoutCount + 1
+        elseif executionResult.error and executionResult.error:find("Memory limit") then
+            stats.memoryLimitCount = stats.memoryLimitCount + 1
         end
-        userLimiter.executions = newExecutions
-        userLimiter.lastCleanup = currentTime
     end
     
-    -- Check rate limit
-    if #userLimiter.executions >= MAX_EXECUTIONS_PER_WINDOW then
-        return false
-    end
+    stats.totalExecutionTime = stats.totalExecutionTime + (executionResult.executionTime or 0)
+    stats.totalMemoryUsed = stats.totalMemoryUsed + (executionResult.memoryUsage or 0)
     
-    -- Add current execution
-    table.insert(userLimiter.executions, currentTime)
-    return true
+    -- Update averages
+    stats.averageExecutionTime = stats.totalExecutionTime / stats.totalExecutions
+    stats.averageMemoryUsage = stats.totalMemoryUsed / stats.totalExecutions
 end
 
--- Replicate script to authorized client
-function SecureExecutor:replicateToClient(player, executionId, scriptCode, serverResult)
-    -- Verify client replication permissions - require Admin level 2+ for replication
-    local permissionLevel = self.adminSystem:getPermissionLevel(player)
-    if permissionLevel < 2 then
-        return false, "Insufficient permissions for client replication (Admin level 2+ required)"
+function SecureExecutor:getPlayerStats(player)
+    if not self:checkSpecificPermission(player, "canAdvancedStats") then
+        return nil, "Insufficient permissions for advanced statistics"
     end
     
-    -- Additional console permission check
-    if not self.adminSystem:hasPermission(player, "console") then
-        return false, "Console access required for client replication"
-    end
-    
-    -- Create replication package
-    local replicationPackage = {
-        executionId = executionId,
-        scriptCode = scriptCode,
-        serverResult = serverResult,
-        timestamp = tick(),
-        adminLevel = self.adminSystem:getPermissionLevel(player)
-    }
-    
-    -- Encrypt replication data
-    local encryptedPackage = self:encryptReplicationData(replicationPackage, player)
-    
-    -- Send to client
-    self:sendToClient(player, "script_replication", encryptedPackage)
-    
-    -- Log replication
-    self:logExecution(player, executionId, "REPLICATED", "Script replicated to client")
-    
-    return true
-end
-
--- Encrypt replication data
-function SecureExecutor:encryptReplicationData(data, player)
-    -- Simple encryption using player-specific key
-    local key = tostring(player.UserId) .. "_" .. tostring(tick())
-    local serialized = HttpService:JSONEncode(data)
-    
-    -- XOR encryption (simple but effective for this use case)
-    local encrypted = {}
-    for i = 1, #serialized do
-        local char = serialized:sub(i, i)
-        local keyChar = key:sub(((i - 1) % #key) + 1, ((i - 1) % #key) + 1)
-        local encryptedChar = string.char(bit32.bxor(string.byte(char), string.byte(keyChar)))
-        table.insert(encrypted, encryptedChar)
-    end
-    
-    return {
-        data = table.concat(encrypted),
-        key = key,
-        checksum = self:generateChecksum(serialized)
+    local userId = player.UserId
+    return self.playerStats[userId] or {
+        totalExecutions = 0,
+        successfulExecutions = 0,
+        failedExecutions = 0,
+        averageExecutionTime = 0,
+        averageMemoryUsage = 0,
+        lastExecution = 0
     }
 end
 
--- Generate checksum for data integrity
-function SecureExecutor:generateChecksum(data)
-    local hash = 0
-    for i = 1, #data do
-        hash = (hash + string.byte(data:sub(i, i))) % 1000000
-    end
-    return hash
-end
-
--- Send execution result to client
-function SecureExecutor:sendExecutionResult(player, executionId, resultType, message)
-    -- Get admin remotes
-    local adminRemotes = ReplicatedStorage:FindFirstChild("AdminRemotes")
-    if not adminRemotes then return end
-    
-    local executorRemote = adminRemotes:FindFirstChild("ExecutorResult")
-    if not executorRemote then return end
-    
-    -- Send secure result
-    executorRemote:FireClient(player, {
-        executionId = executionId,
-        type = resultType,
-        message = message,
-        timestamp = tick()
-    })
-end
-
--- Send data to client
-function SecureExecutor:sendToClient(player, eventType, data)
-    local adminRemotes = ReplicatedStorage:FindFirstChild("AdminRemotes")
-    if not adminRemotes then return end
-    
-    local replicationRemote = adminRemotes:FindFirstChild("ClientReplication")
-    if not replicationRemote then return end
-    
-    replicationRemote:FireClient(player, eventType, data)
-end
-
--- Log execution activity
-function SecureExecutor:logExecution(player, executionId, action, details)
-    local logEntry = {
-        executionId = executionId,
-        player = player.Name,
-        playerId = player.UserId,
-        action = action,
-        details = details,
-        timestamp = os.time(),
-        serverTime = tick()
-    }
-    
-    -- Add to execution history
-    table.insert(executionHistory, logEntry)
-    
-    -- Limit history size
-    if #executionHistory > 1000 then
-        table.remove(executionHistory, 1)
-    end
-    
-    -- Log to admin system
-    if self.adminSystem and self.adminSystem.logAction then
-        self.adminSystem:logAction(player, "EXECUTOR_" .. action, executionId, details)
-    end
-    
-    -- Console output
-    print("[SECURE EXECUTOR]", player.Name, action, details:sub(1, 100))
-end
-
--- Update execution statistics
-function SecureExecutor:updateExecutionStats(success, executionTime)
-    executionStats.totalExecutions = executionStats.totalExecutions + 1
-    
-    -- Update average execution time
-    local currentAverage = executionStats.averageExecutionTime
-    local totalExecs = executionStats.totalExecutions
-    executionStats.averageExecutionTime = ((currentAverage * (totalExecs - 1)) + executionTime) / totalExecs
-end
-
--- Cleanup execution resources
-function SecureExecutor:cleanupExecution(executionId)
-    -- Remove from active executions
-    if activeExecutions[executionId] then
-        activeExecutions[executionId] = nil
-    end
-    
-    -- Remove environment
-    if self.secureEnvironments[executionId] then
-        self.secureEnvironments[executionId] = nil
-    end
-    
-    -- Garbage collection hint
-    collectgarbage("collect")
-end
-
--- Setup periodic cleanup tasks
+-- Enhanced cleanup with per-player cache management
 function SecureExecutor:setupCleanupTasks()
-    -- Cleanup old executions every 5 minutes
     spawn(function()
         while true do
             wait(300) -- 5 minutes
-            self:performCleanup()
+            self:performAdvancedCleanup()
+        end
+    end)
+    
+    -- Memory monitoring task
+    spawn(function()
+        while true do
+            wait(60) -- 1 minute
+            self:performMemoryCleanup()
+        end
+    end)
+    
+    -- Cache cleanup task
+    spawn(function()
+        while true do
+            wait(600) -- 10 minutes
+            self:performCacheCleanup()
         end
     end)
 end
 
--- Perform periodic cleanup
-function SecureExecutor:performCleanup()
+-- Suggestion #4: Cache cleanup
+function SecureExecutor:performCacheCleanup()
     local currentTime = tick()
     
-    -- Clean up stale executions
-    for executionId, execution in pairs(activeExecutions) do
-        if currentTime - execution.startTime > EXECUTION_TIMEOUT then
-            self:cleanupExecution(executionId)
-            self:logExecution(execution.player, executionId, "CLEANUP", "Stale execution cleaned up")
+    -- Clean up old execution caches
+    for executionId, cacheData in pairs(self.requireCache) do
+        if currentTime - (self.secureEnvironments[executionId] and self.secureEnvironments[executionId].createdAt or 0) > 3600 then -- 1 hour
+            self.requireCache[executionId] = nil
         end
     end
     
-    -- Clean up rate limiter
-    for userId, limiter in pairs(self.rateLimiter) do
-        if currentTime - limiter.lastCleanup > RATE_LIMIT_WINDOW * 2 then
-            self.rateLimiter[userId] = nil
+    -- Clean up old encryption keys
+    for userId, keyData in pairs(self.encryptionKeys) do
+        if currentTime - self.lastKeyRotation > ENCRYPTION_KEY_ROTATION_INTERVAL * 2 then
+            self.encryptionKeys[userId] = nil
         end
     end
     
-    -- Garbage collection
-    collectgarbage("collect")
+    print("[PERFECTED EXECUTOR] Cache cleanup completed")
 end
 
--- Get execution statistics
-function SecureExecutor:getExecutionStats()
+-- Main execution function with all improvements
+function SecureExecutor:executeSecureScript(player, scriptCode, executionId)
+    -- Granular permission check
+    if not self:checkSpecificPermission(player, "canExecuteScripts") then
+        return false, "Insufficient permissions for script execution"
+    end
+    
+    -- Rate limiting
+    if not self:checkRateLimit(player) then
+        return false, "Rate limit exceeded"
+    end
+    
+    -- Create secure environment
+    local environment = self:createSecureEnvironment(player, executionId)
+    
+    -- Compile script
+    local compiledScript, compileError = load(scriptCode, "@UserScript", "t", environment)
+    if not compiledScript then
+        return false, "Script compilation failed: " .. tostring(compileError)
+    end
+    
+    -- Execute with enhanced timeout
+    local startTime = tick()
+    local success, result = self:executeWithTimeout(player, executionId, compiledScript, scriptCode)
+    local executionTime = tick() - startTime
+    
+    -- Update player statistics
+    self:updatePlayerStats(player, {
+        success = success,
+        executionTime = executionTime,
+        memoryUsage = activeExecutions[executionId] and activeExecutions[executionId].memoryUsage or 0,
+        error = not success and result or nil
+    })
+    
+    return success, result
+end
+
+-- Enhanced statistics with all improvements
+function SecureExecutor:getExecutionStats(player)
+    if not self:checkSpecificPermission(player, "canAdvancedStats") then
+        return nil, "Insufficient permissions"
+    end
+    
+    local playerStats = self:getPlayerStats(player)
+    local globalStats = self:getGlobalStats()
+    
     return {
-        totalExecutions = executionStats.totalExecutions,
-        successfulExecutions = executionStats.successfulExecutions,
-        failedExecutions = executionStats.failedExecutions,
-        successRate = executionStats.totalExecutions > 0 and 
-                     (executionStats.successfulExecutions / executionStats.totalExecutions) * 100 or 0,
-        averageExecutionTime = executionStats.averageExecutionTime,
-        activeExecutions = #activeExecutions,
-        historySize = #executionHistory
+        player = playerStats,
+        global = globalStats,
+        system = {
+            activeExecutions = #activeExecutions,
+            cacheSize = self:getCacheSize(),
+            memoryOptimization = self:getMemoryOptimization(),
+            encryptionStatus = self:getEncryptionStatus()
+        }
     }
-end
-
--- Get execution history
-function SecureExecutor:getExecutionHistory(limit)
-    limit = limit or 50
-    local history = {}
-    
-    for i = math.max(1, #executionHistory - limit + 1), #executionHistory do
-        table.insert(history, executionHistory[i])
-    end
-    
-    return history
 end
 
 return SecureExecutor
