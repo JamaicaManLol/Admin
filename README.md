@@ -4,12 +4,24 @@ A comprehensive admin system for Roblox games with console interface and powerfu
 
 ## Features
 
-- **Server-Side Console**: Execute Lua code directly on the server
-- **Admin Commands**: Teleport, kick, ban, give items, and more
-- **Security System**: Role-based permissions and secure remote handling
-- **GUI Console**: Modern interface for easy command execution
-- **Logging System**: Track all admin actions
-- **Extensible**: Easy to add new commands
+### 🚀 Enhanced Server-Side Executor
+- **Secure Luau Execution**: Advanced sandboxed script execution with comprehensive security
+- **Client Replication**: Scripts can be securely replicated and executed on authorized clients
+- **Rate Limiting**: Built-in protection against abuse with configurable limits
+- **Resource Management**: Memory and execution time limits with automatic cleanup
+- **Real-time Monitoring**: Detailed execution statistics and performance metrics
+
+### 🔐 Advanced Security
+- **Multi-Level Authentication**: Secure token-based authentication system
+- **Permission Validation**: Strict admin level verification and anti-privilege escalation
+- **Encrypted Communication**: Client replication uses encryption and checksums
+- **Session Management**: Heartbeat system with automatic session revocation
+
+### 🎮 Professional Admin Tools
+- **Admin Commands**: Teleport, kick, ban, god mode, and extensive player management
+- **Modern GUI Console**: Enhanced interface with replication controls
+- **Comprehensive Logging**: Track all admin actions with detailed audit trails
+- **Network Optimization**: Efficient data transmission with bandwidth management
 
 ## Installation
 
@@ -48,9 +60,22 @@ Edit `ServerScriptService/AdminSystem/Config.lua` to:
 
 ## Usage
 
+### Basic Commands
 1. Admins can open the console with `/console` command or GUI button
-2. Type commands in chat or use the console interface
-3. Execute server-side Lua code through the console (super admins only)
+2. Type commands in chat or use the admin panel interface
+3. Use `/help` to see all available commands
+
+### Enhanced Console
+- **Ctrl+Enter**: Execute script on server only
+- **Ctrl+Shift+Enter**: Execute on server AND replicate to authorized client
+- Real-time output display with execution IDs and timestamps
+- Comprehensive error handling and logging
+
+### Client Replication
+- Authorized admins automatically receive client replicator authentication
+- Scripts executed with replication run on both server and client
+- Secure encryption ensures only authorized clients receive scripts
+- Built-in monitoring and statistics tracking
 
 ## Support
 

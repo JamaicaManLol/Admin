@@ -10,17 +10,21 @@ This document shows exactly where each file should be placed in your Roblox Stud
 │   └── 📁 AdminSystem/
 │       ├── 📄 Config.lua (ModuleScript)
 │       ├── 📄 AdminCore.lua (ServerScript) 
-│       └── 📄 Commands.lua (ModuleScript)
+│       ├── 📄 Commands.lua (ModuleScript)
+│       └── 📄 SecureExecutor.lua (ModuleScript) **NEW**
 │
 ├── 📁 StarterPlayer
 │   └── 📁 StarterPlayerScripts/
-│       └── 📄 AdminClient.lua (LocalScript)
+│       ├── 📄 AdminClient.lua (LocalScript)
+│       └── 📄 ClientReplicator.lua (LocalScript) **NEW**
 │
 └── 📁 ReplicatedStorage
     └── 📁 AdminRemotes/ (Auto-created by AdminCore.lua)
         ├── 📄 ExecuteCommand (RemoteEvent)
         ├── 📄 ConsoleToggle (RemoteEvent)
-        └── 📄 AdminLog (RemoteEvent)
+        ├── 📄 AdminLog (RemoteEvent)
+        ├── 📄 ExecutorResult (RemoteEvent) **NEW**
+        └── 📄 ClientReplication (RemoteEvent) **NEW**
 ```
 
 ## 🛠️ Script Types Reference
@@ -30,7 +34,9 @@ This document shows exactly where each file should be placed in your Roblox Stud
 | `Config.lua` | **ModuleScript** | ServerScriptService/AdminSystem/ | Admin configuration and settings |
 | `AdminCore.lua` | **ServerScript** | ServerScriptService/AdminSystem/ | Main server-side admin logic |
 | `Commands.lua` | **ModuleScript** | ServerScriptService/AdminSystem/ | All admin command implementations |
+| `SecureExecutor.lua` | **ModuleScript** | ServerScriptService/AdminSystem/ | **NEW** - Advanced script execution engine |
 | `AdminClient.lua` | **LocalScript** | StarterPlayer/StarterPlayerScripts/ | Client-side GUI and interface |
+| `ClientReplicator.lua` | **LocalScript** | StarterPlayer/StarterPlayerScripts/ | **NEW** - Client-side script replication system |
 
 ## 📋 Step-by-Step Setup
 
@@ -58,13 +64,25 @@ For each server file:
 2. **Rename** to `Commands`
 3. **Replace** the default code with the Commands.lua content
 
+#### SecureExecutor.lua (ModuleScript) **NEW**
+1. **Insert Object** → `ModuleScript`
+2. **Rename** to `SecureExecutor`
+3. **Replace** the default code with the SecureExecutor.lua content
+
 ### 2. StarterPlayer Setup
 
 1. Navigate to `StarterPlayer` → `StarterPlayerScripts`
 2. **Right-click** on `StarterPlayerScripts`
+
+#### AdminClient.lua (LocalScript)
 3. **Insert Object** → `LocalScript`
 4. **Rename** to `AdminClient`
 5. **Replace** the default code with the AdminClient.lua content
+
+#### ClientReplicator.lua (LocalScript) **NEW**
+6. **Insert Object** → `LocalScript`
+7. **Rename** to `ClientReplicator`
+8. **Replace** the default code with the ClientReplicator.lua content
 
 ### 3. Verification
 
@@ -75,11 +93,13 @@ After setup, your Explorer should look like this:
 ├── 📁 AdminSystem
 │   ├── 📜 Config (ModuleScript)
 │   ├── 📜 AdminCore (ServerScript)
-│   └── 📜 Commands (ModuleScript)
+│   ├── 📜 Commands (ModuleScript)
+│   └── 📜 SecureExecutor (ModuleScript) ⭐ NEW
 
 👤 StarterPlayer
 └── 📁 StarterPlayerScripts
-    └── 📜 AdminClient (LocalScript)
+    ├── 📜 AdminClient (LocalScript)
+    └── 📜 ClientReplicator (LocalScript) ⭐ NEW
 ```
 
 ## ⚡ Auto-Generated Components
@@ -91,7 +111,9 @@ When you run the game, `AdminCore.lua` will automatically create:
 └── 📁 AdminRemotes
     ├── 🔗 ExecuteCommand (RemoteEvent)
     ├── 🔗 ConsoleToggle (RemoteEvent)
-    └── 🔗 AdminLog (RemoteEvent)
+    ├── 🔗 AdminLog (RemoteEvent)
+    ├── 🔗 ExecutorResult (RemoteEvent) ⭐ NEW
+    └── 🔗 ClientReplication (RemoteEvent) ⭐ NEW
 ```
 
 **Note:** These are automatically created - don't create them manually!
