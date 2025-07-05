@@ -2,7 +2,7 @@
 
 All notable changes to this admin system will be documented in this file.
 
-## [1.0.0] - 2024-12-28
+## [1.0.0] - 2025-7-5
 
 ### 🎉 Initial Release
 
@@ -93,7 +93,7 @@ StarterPlayer/StarterPlayerScripts/
 
 ---
 
-## [1.1.0] - 2024-12-28
+## [1.1.0] - 2025-7-5
 
 ### 🚀 Major Enhancement Release
 
