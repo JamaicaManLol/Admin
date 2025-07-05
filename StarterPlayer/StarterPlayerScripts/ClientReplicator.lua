@@ -50,17 +50,31 @@ function ClientReplicator.new()
     self.clientEnvironments = {}
     self.replicationQueue = {}
     self.authCallbacks = {}
+    self.adminCheckComplete = false
     
-    -- Initialize connection
-    self:initializeConnection()
-    
-    -- Setup heartbeat
-    self:setupHeartbeat()
-    
-    -- Setup cleanup
-    self:setupCleanupTasks()
+    -- Wait for initial admin check before full initialization
+    self:performInitialAdminCheck()
     
     return self
+end
+
+-- Perform initial admin privilege check
+function ClientReplicator:performInitialAdminCheck()
+    -- Don't initialize replicator for non-admins
+    spawn(function()
+        wait(2) -- Wait for admin system to load
+        
+        -- Initialize connection only after admin check
+        self:initializeConnection()
+        
+        -- Setup other systems only if authenticated
+        if authenticationState.isAuthenticated then
+            self:setupHeartbeat()
+            self:setupCleanupTasks()
+        end
+        
+        self.adminCheckComplete = true
+    end)
 end
 
 -- Initialize connection to server
@@ -154,22 +168,60 @@ end
 -- Process authentication response
 function ClientReplicator:processAuthenticationResponse(data)
     if data.isAdmin and data.level > 0 then
-        authenticationState.isAuthenticated = true
-        authenticationState.adminLevel = data.level
-        authenticationState.authToken = self:generateAuthToken(data)
-        authenticationState.lastHeartbeat = tick()
-        
-        print("[CLIENT REPLICATOR] Authentication successful - Level:", data.level)
-        
-        -- Notify authentication success
-        self:notifyAuthenticationSuccess(data)
+        -- Additional security check - only activate for Admin level 2+ or higher
+        if data.level >= 2 then
+            authenticationState.isAuthenticated = true
+            authenticationState.adminLevel = data.level
+            authenticationState.authToken = self:generateAuthToken(data)
+            authenticationState.lastHeartbeat = tick()
+            
+            print("[CLIENT REPLICATOR] Authentication successful - Level:", data.level)
+            
+            -- Initialize systems now that we're authenticated
+            if not self.heartbeatActive then
+                self:setupHeartbeat()
+            end
+            if not self.cleanupActive then
+                self:setupCleanupTasks()
+            end
+            
+            -- Notify authentication success
+            self:notifyAuthenticationSuccess(data)
+        else
+            print("[CLIENT REPLICATOR] Authentication failed - Insufficient admin level (requires Admin level 2+)")
+            self:disableReplicator("Insufficient admin level")
+        end
     else
         authenticationState.isAuthenticated = false
         authenticationState.adminLevel = 0
         authenticationState.authToken = nil
         
         print("[CLIENT REPLICATOR] Authentication failed - No admin privileges")
+        self:disableReplicator("No admin privileges")
     end
+end
+
+-- Disable replicator for non-admin users
+function ClientReplicator:disableReplicator(reason)
+    authenticationState.isAuthenticated = false
+    authenticationState.adminLevel = 0
+    authenticationState.authToken = nil
+    
+    -- Clear all data
+    self.clientEnvironments = {}
+    self.replicationQueue = {}
+    replicationState.activeReplications = {}
+    replicationState.executionHistory = {}
+    replicationState.pendingExecutions = {}
+    
+    -- Disconnect events
+    for _, connection in pairs(self.remoteEvents) do
+        if connection and connection.disconnect then
+            pcall(function() connection:disconnect() end)
+        end
+    end
+    
+    print("[CLIENT REPLICATOR] Replicator disabled:", reason)
 end
 
 -- Generate authentication token
@@ -202,6 +254,12 @@ end
 
 -- Handle script replication
 function ClientReplicator:handleScriptReplication(encryptedData)
+    -- Security check - ensure user is authenticated admin
+    if not authenticationState.isAuthenticated or authenticationState.adminLevel < 2 then
+        warn("[CLIENT REPLICATOR] Replication rejected - Not authenticated as admin")
+        return
+    end
+    
     -- Validate replication size
     local dataSize = string.len(HttpService:JSONEncode(encryptedData))
     if dataSize > MAX_REPLICATION_SIZE then
@@ -512,14 +570,22 @@ end
 
 -- Setup heartbeat system
 function ClientReplicator:setupHeartbeat()
+    if self.heartbeatActive then
+        return -- Already active
+    end
+    
+    self.heartbeatActive = true
     spawn(function()
-        while true do
+        while self.heartbeatActive and authenticationState.isAuthenticated do
             wait(HEARTBEAT_INTERVAL)
             
             if authenticationState.isAuthenticated then
                 self:sendHeartbeat()
+            else
+                break -- Exit if authentication lost
             end
         end
+        self.heartbeatActive = false
     end)
 end
 
@@ -538,11 +604,22 @@ end
 
 -- Setup cleanup tasks
 function ClientReplicator:setupCleanupTasks()
+    if self.cleanupActive then
+        return -- Already active
+    end
+    
+    self.cleanupActive = true
     spawn(function()
-        while true do
+        while self.cleanupActive and authenticationState.isAuthenticated do
             wait(300) -- 5 minutes
-            self:performCleanup()
+            
+            if authenticationState.isAuthenticated then
+                self:performCleanup()
+            else
+                break -- Exit if authentication lost
+            end
         end
+        self.cleanupActive = false
     end)
 end
 
@@ -638,6 +715,15 @@ end
 
 -- Get replication statistics
 function ClientReplicator:getReplicationStats()
+    -- Security check - only return stats for authenticated admins
+    if not authenticationState.isAuthenticated or authenticationState.adminLevel < 2 then
+        return {
+            isAuthenticated = false,
+            adminLevel = 0,
+            message = "Access denied - Admin privileges required"
+        }
+    end
+    
     return {
         isAuthenticated = authenticationState.isAuthenticated,
         adminLevel = authenticationState.adminLevel,
@@ -654,6 +740,18 @@ end
 
 -- Get execution history
 function ClientReplicator:getExecutionHistory(limit)
+    -- Security check - only return history for authenticated admins
+    if not authenticationState.isAuthenticated or authenticationState.adminLevel < 2 then
+        return {
+            {
+                executionId = "access_denied",
+                type = "ERROR",
+                message = "Access denied - Admin privileges required",
+                timestamp = tick()
+            }
+        }
+    end
+    
     limit = limit or 50
     local history = {}
     
@@ -665,10 +763,26 @@ function ClientReplicator:getExecutionHistory(limit)
     return history
 end
 
--- Initialize client replicator
+-- Initialize client replicator (only for potential admins)
 local clientReplicator = ClientReplicator.new()
 
--- Global access
-_G.ClientReplicator = clientReplicator
-
-print("[CLIENT REPLICATOR] Client replicator initialized successfully!")
+-- Set up conditional global access
+spawn(function()
+    -- Wait for authentication check to complete
+    while not clientReplicator.adminCheckComplete do
+        wait(0.5)
+    end
+    
+    -- Only provide global access if authenticated as admin
+    if authenticationState.isAuthenticated and authenticationState.adminLevel >= 2 then
+        _G.ClientReplicator = clientReplicator
+        print("[CLIENT REPLICATOR] Client replicator initialized successfully for admin level", authenticationState.adminLevel)
+    else
+        -- Clear any potential global access for non-admins
+        _G.ClientReplicator = nil
+        print("[CLIENT REPLICATOR] Client replicator disabled - No admin privileges")
+        
+        -- Disable the replicator completely for non-admins
+        clientReplicator:disableReplicator("Non-admin user")
+    end
+end)

@@ -149,6 +149,11 @@ function SecureExecutor:createSecureEnvironment(player, executionId)
         executor_player = player,
         executor_timestamp = tick(),
         
+        -- Secure require function
+        require = function(moduleScript)
+            return self:secureRequire(player, moduleScript)
+        end,
+        
         -- Safe print function
         print = function(...)
             local args = {...}
@@ -259,6 +264,96 @@ function SecureExecutor:createWorkspaceProxy(player)
     workspaceProxy.Gravity = workspace.Gravity
     
     return workspaceProxy
+end
+
+-- Secure require function implementation
+function SecureExecutor:secureRequire(player, moduleScript)
+    -- Validate that the object is actually a ModuleScript
+    if not moduleScript or not moduleScript:IsA("ModuleScript") then
+        error("require() can only be used with ModuleScript objects")
+    end
+    
+    -- Get the full path of the ModuleScript
+    local modulePath = self:getModulePath(moduleScript)
+    
+    -- Check if the module is in restricted locations
+    if self:isRestrictedModule(modulePath) then
+        error("Access denied: Cannot require modules from restricted locations")
+    end
+    
+    -- Check admin permissions for sensitive modules
+    if self:isSensitiveModule(modulePath) then
+        local permissionLevel = self.adminSystem:getPermissionLevel(player)
+        if permissionLevel < 3 then -- Require SuperAdmin+ for sensitive modules
+            error("Insufficient permissions: SuperAdmin level required for sensitive modules")
+        end
+    end
+    
+    -- Log the require attempt
+    self:logExecution(player, "MODULE_REQUIRE", "ATTEMPT", modulePath)
+    
+    -- Safely require the module
+    local success, result = pcall(function()
+        return require(moduleScript)
+    end)
+    
+    if success then
+        self:logExecution(player, "MODULE_REQUIRE", "SUCCESS", modulePath)
+        return result
+    else
+        self:logExecution(player, "MODULE_REQUIRE", "ERROR", modulePath .. " - " .. tostring(result))
+        error("Module require failed: " .. tostring(result))
+    end
+end
+
+-- Get module path for logging and security checks
+function SecureExecutor:getModulePath(moduleScript)
+    local path = {}
+    local current = moduleScript
+    
+    while current and current ~= game do
+        table.insert(path, 1, current.Name)
+        current = current.Parent
+    end
+    
+    return table.concat(path, ".")
+end
+
+-- Check if module is in restricted location
+function SecureExecutor:isRestrictedModule(modulePath)
+    local restrictedPaths = {
+        "ServerScriptService.AdminSystem",  -- Protect admin system modules
+        "ServerStorage",                     -- Protect server storage
+        "HttpService",                       -- Prevent HTTP access
+        "DataStoreService",                  -- Prevent data store access
+        "MessagingService",                  -- Prevent messaging service access
+        "TeleportService"                    -- Prevent teleport service access
+    }
+    
+    for _, restrictedPath in ipairs(restrictedPaths) do
+        if modulePath:find(restrictedPath) then
+            return true
+        end
+    end
+    
+    return false
+end
+
+-- Check if module is sensitive (requires higher permissions)
+function SecureExecutor:isSensitiveModule(modulePath)
+    local sensitivePaths = {
+        "ReplicatedStorage.AdminModules",    -- Admin-specific modules
+        "ServerScriptService.GameSystems",   -- Core game systems
+        "Workspace.SecurityModules"          -- Security-related modules
+    }
+    
+    for _, sensitivePath in ipairs(sensitivePaths) do
+        if modulePath:find(sensitivePath) then
+            return true
+        end
+    end
+    
+    return false
 end
 
 -- Execute script with security measures
@@ -404,9 +499,15 @@ end
 
 -- Replicate script to authorized client
 function SecureExecutor:replicateToClient(player, executionId, scriptCode, serverResult)
-    -- Verify client replication permissions
+    -- Verify client replication permissions - require Admin level 2+ for replication
+    local permissionLevel = self.adminSystem:getPermissionLevel(player)
+    if permissionLevel < 2 then
+        return false, "Insufficient permissions for client replication (Admin level 2+ required)"
+    end
+    
+    -- Additional console permission check
     if not self.adminSystem:hasPermission(player, "console") then
-        return false, "Insufficient permissions for client replication"
+        return false, "Console access required for client replication"
     end
     
     -- Create replication package

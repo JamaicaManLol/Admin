@@ -25,6 +25,17 @@ local allowedServices = {
 -- ServerStorage, ServerScriptService, DataStoreService are blocked
 ```
 
+#### Secure require() Function
+```lua
+-- Enhanced require() support with security validation
+require(game.ReplicatedStorage.MyModule) -- ✅ Allowed
+require(game.ServerScriptService.AdminSystem.Config) -- ❌ Blocked (Admin system protected)
+require(game.ServerStorage.SensitiveModule) -- ❌ Blocked (Server storage restricted)
+
+-- Permission-based module access
+-- SuperAdmin+ required for sensitive modules in designated paths
+```
+
 #### Permission Validation
 - **Multi-Level Verification**: Authentication at script execution and replication
 - **Admin Level Checking**: Commands require appropriate permission levels
@@ -50,13 +61,19 @@ local allowedServices = {
 
 #### Multi-Factor Verification
 ```lua
--- Client authentication process
+-- Client authentication process (Admin Level 2+ Required)
 1. Client requests authentication with generated token
-2. Server validates admin permissions
+2. Server validates admin permissions (minimum Level 2)
 3. Server sends encrypted authentication response
 4. Client generates session-specific auth token
 5. Periodic heartbeat maintains session validity
 ```
+
+#### Admin Level Requirements
+- **Moderator (Level 1)**: Basic commands only, no client replication
+- **Admin (Level 2+)**: Full commands + client replication access
+- **SuperAdmin (Level 3+)**: Sensitive module access + statistics
+- **Owner (Level 4)**: Complete system access
 
 #### Session Management
 - **Token-Based Authentication**: Secure session tokens with expiration
@@ -220,16 +237,25 @@ local allowedServices = {
 
 ### Basic Server Execution
 ```lua
--- Execute on server only
+-- Execute on server only (All admin levels)
 print("Hello from server!")
 for _, player in pairs(game.Players:GetPlayers()) do
     print("Player:", player.Name)
 end
+
+-- Using secure require() function
+local myModule = require(game.ReplicatedStorage.MyModule)
+print("Module loaded:", myModule.getData())
 ```
 
 ### Client Replication Example
 ```lua
--- Execute on server, then replicate to client
+-- Execute on server, then replicate to client (Admin Level 2+ ONLY)
+-- Use Ctrl+Shift+Enter to enable replication
+
+print("Creating GUI on both server and client...")
+print("Your admin level:", admin:getPermissionLevel(executor_player))
+
 local gui = Instance.new("ScreenGui")
 gui.Name = "TestGUI"
 gui.Parent = playerGui
@@ -240,7 +266,12 @@ frame.Position = UDim2.new(0.25, 0, 0.25, 0)
 frame.BackgroundColor3 = Color3.fromRGB(100, 150, 200)
 frame.Parent = gui
 
-print("GUI created on both server and client!")
+-- Different behavior based on execution context
+if game:GetService("RunService"):IsServer() then
+    print("GUI created on SERVER")
+else
+    print("GUI created on CLIENT via replication")
+end
 ```
 
 ### Statistics Monitoring
