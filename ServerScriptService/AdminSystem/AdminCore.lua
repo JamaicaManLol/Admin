@@ -8,6 +8,7 @@ local StarterGui = game:GetService("StarterGui")
 -- Load configuration
 local Config = require(script.Parent.Config)
 local Commands = require(script.Parent.Commands)
+local SecureExecutor = require(script.Parent.SecureExecutor)
 
 -- Admin System Class
 local AdminCore = {}
@@ -35,12 +36,24 @@ local LogRemote = Instance.new("RemoteEvent")
 LogRemote.Name = "AdminLog"
 LogRemote.Parent = AdminRemotes
 
+-- Create additional remote events for secure executor
+local ExecutorResultRemote = Instance.new("RemoteEvent")
+ExecutorResultRemote.Name = "ExecutorResult"
+ExecutorResultRemote.Parent = AdminRemotes
+
+local ClientReplicationRemote = Instance.new("RemoteEvent")
+ClientReplicationRemote.Name = "ClientReplication"
+ClientReplicationRemote.Parent = AdminRemotes
+
 -- Initialize the admin system
 function AdminCore.new()
     local self = setmetatable({}, AdminCore)
     
     self.logs = {}
     self.godPlayers = {}
+    
+    -- Initialize secure executor
+    self.secureExecutor = SecureExecutor.new(self)
     
     -- Load ban data
     self:loadBanData()
@@ -206,6 +219,15 @@ function AdminCore:connectEvents()
         end
     end)
     
+    -- Handle client replication authentication and heartbeat
+    LogRemote.OnServerEvent:Connect(function(player, eventType, data)
+        if eventType == "request_auth" then
+            self:handleAuthenticationRequest(player, data)
+        elseif eventType == "heartbeat" then
+            self:handleClientHeartbeat(player, data)
+        end
+    end)
+    
     -- Handle chat commands
     Players.PlayerAdded:Connect(function(player)
         player.Chatted:Connect(function(message)
@@ -250,62 +272,21 @@ function AdminCore:handleChatCommand(player, command)
 end
 
 -- Handle console code execution
-function AdminCore:handleConsoleExecute(player, code)
+function AdminCore:handleConsoleExecute(player, code, replicateToClient)
     if not self:hasPermission(player, "execute") then
         self:sendMessage(player, "You don't have permission to execute code.", "Error")
         return
     end
     
-    -- Log the execution attempt
-    self:logAction(player, "EXECUTE", "console", code:sub(1, 100))
-    
-    -- Create secure environment
-    local env = {
-        -- Safe globals
-        print = print,
-        warn = warn,
-        error = error,
-        pairs = pairs,
-        ipairs = ipairs,
-        next = next,
-        type = type,
-        tostring = tostring,
-        tonumber = tonumber,
-        math = math,
-        string = string,
-        table = table,
-        
-        -- Game services (read-only access recommended)
-        game = game,
-        workspace = workspace,
-        Players = Players,
-        
-        -- Admin system access
-        admin = self,
-        config = Config,
-        
-        -- Utility functions
-        getPlayers = function(name)
-            return self:findPlayers(name)
-        end
-    }
-    
-    -- Execute code in secure environment
-    local func, compileError = loadstring(code)
-    
-    if not func then
-        LogRemote:FireClient(player, "console_output", "Compile Error: " .. tostring(compileError))
-        return
-    end
-    
-    setfenv(func, env)
-    
-    local success, result = pcall(func)
+    -- Use secure executor for advanced script execution
+    local success, result = self.secureExecutor:executeScript(player, code, replicateToClient)
     
     if success then
-        LogRemote:FireClient(player, "console_output", "Output: " .. tostring(result))
+        -- Send success result to client console
+        LogRemote:FireClient(player, "console_output", "Execution successful: " .. tostring(result))
     else
-        LogRemote:FireClient(player, "console_output", "Runtime Error: " .. tostring(result))
+        -- Send error result to client console
+        LogRemote:FireClient(player, "console_output", "Execution failed: " .. tostring(result))
     end
 end
 
@@ -332,6 +313,77 @@ function AdminCore:findPlayers(name)
     return players
 end
 
+-- Handle authentication request from client replicator
+function AdminCore:handleAuthenticationRequest(player, data)
+    -- Validate player permissions
+    local permissionLevel = self:getPermissionLevel(player)
+    
+    if permissionLevel > 0 then
+        -- Send authentication success with admin status
+        LogRemote:FireClient(player, "admin_status", {
+            isAdmin = true,
+            level = permissionLevel,
+            commands = self:getAvailableCommands(player),
+            timestamp = tick()
+        })
+        
+        self:logAction(player, "CLIENT_AUTH", "replicator", "Authentication granted")
+        print("[ADMIN SYSTEM] Client replicator authentication granted for", player.Name, "Level:", permissionLevel)
+    else
+        -- Send authentication failure
+        LogRemote:FireClient(player, "admin_status", {
+            isAdmin = false,
+            level = 0,
+            commands = {},
+            timestamp = tick()
+        })
+        
+        print("[ADMIN SYSTEM] Client replicator authentication denied for", player.Name)
+    end
+end
+
+-- Handle client heartbeat
+function AdminCore:handleClientHeartbeat(player, data)
+    -- Validate heartbeat data
+    if not data or not data.authToken or not data.timestamp then
+        return
+    end
+    
+    -- Validate player still has permissions
+    local permissionLevel = self:getPermissionLevel(player)
+    
+    if permissionLevel > 0 then
+        -- Log heartbeat
+        self:logAction(player, "CLIENT_HEARTBEAT", "replicator", "Heartbeat received")
+        
+        -- Send heartbeat acknowledgment if needed
+        -- Can add additional validation or session management here
+    else
+        -- Revoke authentication
+        LogRemote:FireClient(player, "auth_revoked", {
+            reason = "Permissions changed",
+            timestamp = tick()
+        })
+        
+        self:logAction(player, "CLIENT_AUTH_REVOKED", "replicator", "Permissions changed")
+    end
+end
+
+-- Enhanced console execute with replication option
+function AdminCore:executeScriptWithReplication(player, scriptCode, replicateToClient)
+    return self.secureExecutor:executeScript(player, scriptCode, replicateToClient)
+end
+
+-- Get execution statistics from secure executor
+function AdminCore:getExecutionStats()
+    return self.secureExecutor:getExecutionStats()
+end
+
+-- Get execution history from secure executor
+function AdminCore:getExecutionHistory(limit)
+    return self.secureExecutor:getExecutionHistory(limit)
+end
+
 -- Initialize the admin system
 local adminSystem = AdminCore.new()
 
@@ -341,3 +393,4 @@ _G.AdminSystem = adminSystem
 print("[ADMIN SYSTEM] Server-side admin system loaded successfully!")
 print("[ADMIN SYSTEM] Configured admins:", #Config.Admins)
 print("[ADMIN SYSTEM] Available commands:", #Config.CommandPermissions)
+print("[ADMIN SYSTEM] Secure executor initialized with client replication support")

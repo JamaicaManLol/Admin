@@ -348,8 +348,24 @@ function AdminClient:createConsole()
         if enterPressed and UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
             local code = inputArea.Text
             if code and code ~= "" then
-                executeRemote:FireServer("console_execute", code)
+                -- Check if replication should be enabled (Ctrl+Shift+Enter)
+                local replicateToClient = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+                
+                -- Validate replication availability
+                if replicateToClient and not _G.ClientReplicator then
+                    self:addConsoleOutput("[WARNING] Client replication requested but not available (Admin Level 2+ required)")
+                    replicateToClient = false -- Force server-only execution
+                end
+                
+                executeRemote:FireServer("console_execute", code, replicateToClient)
                 inputArea.Text = ""
+                
+                -- Add execution indicator
+                if replicateToClient then
+                    self:addConsoleOutput("[REPLICATION] Script queued for server + client execution")
+                else
+                    self:addConsoleOutput("[SERVER] Script queued for server-only execution")
+                end
             end
         end
     end)
@@ -359,8 +375,23 @@ function AdminClient:createConsole()
     self.consoleOutput = outputArea
     
     -- Add initial message
-    self:addConsoleOutput("Console ready. Press Ctrl+Enter to execute code.")
+    self:addConsoleOutput("Advanced Console ready.")
+    self:addConsoleOutput("Controls:")
+    self:addConsoleOutput("  Ctrl+Enter: Execute on server only")
+    
+    -- Check for replication availability
+    spawn(function()
+        wait(2) -- Wait for replicator initialization
+        if _G.ClientReplicator then
+            self:addConsoleOutput("  Ctrl+Shift+Enter: Execute on server AND replicate to client")
+            self:addConsoleOutput("Client replication: ENABLED (Admin Level 2+)")
+        else
+            self:addConsoleOutput("  Client replication: DISABLED (Requires Admin Level 2+)")
+        end
+    end)
+    
     self:addConsoleOutput("Available globals: game, workspace, Players, admin, config, getPlayers(name)")
+    self:addConsoleOutput("Secure require() function: ENABLED for ModuleScripts")
 end
 
 -- Toggle admin panel
@@ -453,5 +484,46 @@ end
 
 -- Initialize the admin client
 local adminClient = AdminClient.new()
+
+-- Global access
+_G.AdminClient = adminClient
+
+-- Register with client replicator if available (check periodically for late initialization)
+spawn(function()
+    local attempts = 0
+    while attempts < 10 do -- Try for 5 seconds
+        wait(0.5)
+        attempts = attempts + 1
+        
+        if _G.ClientReplicator then
+            _G.ClientReplicator:registerAuthCallback(function(authData)
+                if adminClient.console then
+                    adminClient:addConsoleOutput("[REPLICATOR] Authentication successful - Level " .. authData.level)
+                    adminClient:addConsoleOutput("[REPLICATOR] Client script replication enabled")
+                end
+            end)
+            
+            print("[ADMIN CLIENT] Integrated with client replicator")
+            break
+        end
+    end
+    
+    -- If no client replicator found, user is not high-level admin
+    if not _G.ClientReplicator then
+        print("[ADMIN CLIENT] Client replicator not available - Limited to basic admin functions")
+    end
+end)
+
+-- Add replication status command
+adminClient.getReplicationStats = function(self)
+    if _G.ClientReplicator then
+        return _G.ClientReplicator:getReplicationStats()
+    else
+        return {
+            isAuthenticated = false,
+            message = "Client replicator not available"
+        }
+    end
+end
 
 print("[ADMIN CLIENT] Admin client script loaded successfully!")
