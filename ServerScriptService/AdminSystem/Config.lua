@@ -118,6 +118,7 @@ Config.Webhooks = {
     NotifyOnBan = true,
     NotifyOnKick = true,
     NotifyOnCodeExecution = true,
+    NotifyOnScriptExecution = true,
     NotifyOnRateLimitViolation = true,
     NotifyOnSecurityEvent = true,
     NotifyOnConfigReload = true,        -- God-Tier: Config reload notifications
