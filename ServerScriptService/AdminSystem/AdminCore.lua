@@ -8,8 +8,9 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local DataStoreService = game:GetService("DataStoreService")
-local StarterGui = game:GetService("StarterGui")
+local ServerStorage = game:GetService("ServerStorage")
 local HttpService = game:GetService("HttpService")
+local MemoryStoreService = game:GetService("MemoryStoreService")
 
 -- Load configuration and modules with unified error handling
 local Config = require(script.Parent.Config)
@@ -27,6 +28,28 @@ local CLEANUP_INTERVAL = 300 -- 5 minutes
 local WEBHOOK_RATE_LIMIT = 1 -- second
 local MEMORY_WARNING_THRESHOLD = 1024 * 1024 * 50 -- 50MB
 
+-- Performance optimization constants
+local MAX_LOG_ENTRIES = 1000
+local MAX_ANALYTICS_ENTRIES = 5000
+local MAX_WEBHOOK_QUEUE = 100
+local BATCH_SIZE = 10
+local CACHE_EXPIRY_TIME = 1800 -- 30 minutes
+
+-- MemoryStore for high-performance caching
+local memoryStore = nil
+local memoryStoreInitialized = false
+
+-- Connection cleanup tracking
+local activeConnections = {}
+
+-- Performance monitoring
+local performanceMetrics = {
+    lastMemoryCheck = 0,
+    memoryUsage = 0,
+    activeOperations = 0,
+    operationTimes = {}
+}
+
 -- Data storage initialization
 local banDataStore = nil
 local logDataStore = nil
@@ -36,6 +59,18 @@ local function initializeDataStores()
     local success, error = pcall(function()
         banDataStore = DataStoreService:GetDataStore("AdminBans_" .. DATA_STORE_VERSION)
         logDataStore = DataStoreService:GetDataStore("AdminLogs_" .. DATA_STORE_VERSION)
+        
+        -- Initialize MemoryStore for high-performance caching
+        if MemoryStoreService then
+            local memorySuccess, memoryError = pcall(function()
+                memoryStore = MemoryStoreService:GetSortedMap("AdminCache")
+                memoryStoreInitialized = true
+            end)
+            
+            if not memorySuccess then
+                warn("[ADMIN CORE] MemoryStore initialization failed: " .. tostring(memoryError))
+            end
+        end
     end)
     
     if not success then
@@ -44,6 +79,97 @@ local function initializeDataStores()
     end
     
     return true
+end
+
+-- ====================================================================
+-- PERFORMANCE OPTIMIZATION SYSTEM
+-- ====================================================================
+local function trackConnection(connection, name)
+    if connection then
+        table.insert(activeConnections, {
+            connection = connection,
+            name = name or "Unknown",
+            created = os.clock()
+        })
+    end
+end
+
+local function cleanupConnections()
+    for i = #activeConnections, 1, -1 do
+        local conn = activeConnections[i]
+        if not conn.connection or not conn.connection.Connected then
+            table.remove(activeConnections, i)
+        end
+    end
+end
+
+local function optimizeMemoryUsage(self)
+    local currentTime = os.clock()
+    
+    -- Limit log entries
+    if #self.logs > MAX_LOG_ENTRIES then
+        local removeCount = #self.logs - MAX_LOG_ENTRIES
+        for i = 1, removeCount do
+            table.remove(self.logs, 1)
+        end
+    end
+    
+    -- Limit analytics entries
+    for category, entries in pairs(self.analytics) do
+        if type(entries) == "table" and #entries > MAX_ANALYTICS_ENTRIES then
+            local removeCount = #entries - MAX_ANALYTICS_ENTRIES
+            for i = 1, removeCount do
+                table.remove(entries, 1)
+            end
+        end
+    end
+    
+    -- Limit webhook queue
+    if #self.webhookQueue > MAX_WEBHOOK_QUEUE then
+        warn("[ADMIN CORE] Webhook queue limit reached - clearing oldest entries")
+        local removeCount = #self.webhookQueue - MAX_WEBHOOK_QUEUE
+        for i = 1, removeCount do
+            table.remove(self.webhookQueue, 1)
+        end
+    end
+    
+    -- Clean expired rate limit data
+    for userId, data in pairs(self.rateLimitData) do
+        for actionType, timestamps in pairs(data) do
+            if type(timestamps) == "table" then
+                for i = #timestamps, 1, -1 do
+                    if currentTime - timestamps[i] > 3600 then -- 1 hour
+                        table.remove(timestamps, i)
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Clean expired temporary bans
+    for userId, expireTime in pairs(self.tempBannedUsers) do
+        if currentTime >= expireTime then
+            self.tempBannedUsers[userId] = nil
+        end
+    end
+    
+    -- Update performance metrics
+    performanceMetrics.lastMemoryCheck = currentTime
+    local memInfo = debug.getmemstats and debug.getmemstats() or {}
+    performanceMetrics.memoryUsage = memInfo.memory or 0
+end
+
+local function batchDataStoreOperations(operations)
+    -- Batch multiple DataStore operations for better performance
+    local batches = {}
+    for i = 1, #operations, BATCH_SIZE do
+        local batch = {}
+        for j = i, math.min(i + BATCH_SIZE - 1, #operations) do
+            table.insert(batch, operations[j])
+        end
+        table.insert(batches, batch)
+    end
+    return batches
 end
 
 
@@ -183,7 +309,7 @@ function AdminCore:checkRateLimit(player, actionType)
     
     local success, result = pcall(function()
         local userId = player.UserId
-        local currentTime = tick()
+        local currentTime = os.clock()
         
         -- Check temporary ban status
         if self.tempBannedUsers[userId] and currentTime < self.tempBannedUsers[userId] then
@@ -280,7 +406,7 @@ function AdminCore:handleRateLimitViolation(player, actionType, violationType, a
         end
         
         self.rateLimitData[userId].violations = (self.rateLimitData[userId].violations or 0) + 1
-        self.rateLimitData[userId].lastViolation = tick()
+        self.rateLimitData[userId].lastViolation = os.clock()
         
         local violations = self.rateLimitData[userId].violations
         
@@ -311,7 +437,7 @@ function AdminCore:applyRateLimitPenalty(player, violations)
         local banDuration = Config.RateLimiting.TempBanDuration
         
         -- Apply temporary ban
-        self.tempBannedUsers[userId] = tick() + banDuration
+        self.tempBannedUsers[userId] = os.clock() + banDuration
         
         -- Enhanced logging
         self:logAction(player, "TEMP_BAN", "rate_limit_abuse", 
@@ -371,7 +497,7 @@ function AdminCore:sendWebhook(webhookType, embed, priority)
         end
         
         -- Check rate limiting
-        local currentTime = tick()
+        local currentTime = os.clock()
         local lastTime = self.lastWebhookTime[webhookType] or 0
         
         if currentTime - lastTime < Config.Webhooks.WebhookCooldown then
@@ -465,30 +591,30 @@ end
 function AdminCore:startBackgroundServices()
     local success, error = pcall(function()
         -- Rate limit cleanup service
-        spawn(function()
+        task.spawn(function()
             self:rateLimitCleanupService()
         end)
         
         -- Webhook processing service
-        spawn(function()
+        task.spawn(function()
             self:webhookProcessingService()
         end)
         
         -- Security monitoring service
-        spawn(function()
+        task.spawn(function()
             self:securityMonitoringService()
         end)
         
         -- Analytics reporting service
         if Config.Analytics.Enabled then
-            spawn(function()
+            task.spawn(function()
                 self:analyticsReportingService()
             end)
         end
         
         -- Config backup service
         if Config.DynamicConfig.CreateBackups then
-            spawn(function()
+            task.spawn(function()
                 self:configBackupService()
             end)
         end
@@ -502,33 +628,15 @@ end
 function AdminCore:rateLimitCleanupService()
     while self.initialized do
         local success, error = pcall(function()
-            local currentTime = tick()
+            -- Use optimized memory management
+            optimizeMemoryUsage(self)
             
-            -- Clean rate limit data
-            for userId, data in pairs(self.rateLimitData) do
-                -- Clean action timestamps
-                for actionType, timestamps in pairs(data) do
-                    if type(timestamps) == "table" then
-                        local cleaned = {}
-                        for _, timestamp in ipairs(timestamps) do
-                            if currentTime - timestamp < 3600 then -- Keep 1 hour
-                                table.insert(cleaned, timestamp)
-                            end
-                        end
-                        data[actionType] = cleaned
-                    end
-                end
-                
-                -- Reset violations for reformed players
-                if data.violations and data.violations > 0 and data.lastViolation then
-                    if currentTime - data.lastViolation > 3600 then -- 1 hour clean
-                        data.violations = 0
-                        data.lastViolation = nil
-                    end
-                end
-            end
+            -- Clean up connections
+            cleanupConnections()
             
-            -- Clean expired temporary bans
+            local currentTime = os.clock()
+            
+            -- Clean expired temporary bans with logging
             for userId, expireTime in pairs(self.tempBannedUsers) do
                 if currentTime >= expireTime then
                     self.tempBannedUsers[userId] = nil
@@ -540,13 +648,27 @@ function AdminCore:rateLimitCleanupService()
                     end
                 end
             end
+            
+            -- Performance monitoring
+            if currentTime - performanceMetrics.lastMemoryCheck > 60 then -- Check every minute
+                local memInfo = debug.getmemstats and debug.getmemstats() or {}
+                local currentMemory = memInfo.totalSize or 0
+                
+                if currentMemory > MEMORY_WARNING_THRESHOLD then
+                    warn(string.format("[ADMIN CORE] High memory usage detected: %.2f MB", 
+                        currentMemory / (1024 * 1024)))
+                end
+                
+                performanceMetrics.memoryUsage = currentMemory
+                performanceMetrics.lastMemoryCheck = currentTime
+            end
         end)
         
         if not success then
             warn("[ADMIN CORE] Rate limit cleanup error: " .. tostring(error))
         end
         
-        wait(Config.RateLimiting.CleanupInterval)
+        task.wait(Config.RateLimiting.CleanupInterval)
     end
 end
 
@@ -818,7 +940,7 @@ end
 function AdminCore:performSecurityScan()
     if not Config.Security.MonitorSuspiciousActivity then return end
     
-    local currentTime = tick()
+    local currentTime = os.clock()
     
     for userId, playerData in pairs(self.rateLimitData) do
         local totalCommands = 0
@@ -856,7 +978,7 @@ function AdminCore:isBanned(userId)
     end
     
     -- Check temporary bans
-    if self.tempBannedUsers[userId] and tick() < self.tempBannedUsers[userId] then
+    if self.tempBannedUsers[userId] and os.clock() < self.tempBannedUsers[userId] then
         return true
     end
     
@@ -979,7 +1101,7 @@ function AdminCore:trackAnalyticsEvent(eventType, data)
     local analyticsData = self.analytics[eventType]
     if not analyticsData then return end
     
-    local timestamp = tick()
+    local timestamp = os.clock()
     table.insert(analyticsData, {
         timestamp = timestamp,
         data = data
@@ -1001,7 +1123,7 @@ end
 function AdminCore:generateAnalyticsReport()
     if not Config.Analytics.Enabled then return nil end
     
-    local currentTime = tick()
+    local currentTime = os.clock()
     local report = {
         timestamp = currentTime,
         timeframe = "1 hour",
@@ -1151,9 +1273,9 @@ end
 function AdminCore:startAnalyticsReporting()
     if not Config.Analytics.Enabled then return end
     
-    spawn(function()
+    task.spawn(function()
         while true do
-            wait(Config.Analytics.ReportInterval)
+            task.wait(Config.Analytics.ReportInterval)
             self:sendAnalyticsReport()
         end
     end)
@@ -1230,7 +1352,7 @@ function AdminCore:getSystemStatistics()
         general = {
             totalLogs = #self.logs,
             adminCount = self:getAdminCount(),
-            uptime = tick() - (self.startTime or tick())
+            uptime = os.clock() - (self.startTime or os.clock())
         }
     }
 end
@@ -1401,7 +1523,7 @@ function AdminCore:handleChatCommand(player, command)
             player = player.Name,
             userId = player.UserId,
             args = args,
-            timestamp = tick()
+            timestamp = os.clock()
         })
     end
     
@@ -1484,7 +1606,7 @@ function AdminCore:sendMessage(player, message, messageType)
         RemoteEvents.AdminLog:FireClient(player, "admin_message", {
             message = message,
             type = messageType or "Info",
-            timestamp = tick()
+            timestamp = os.clock()
         })
     end)
 end
@@ -1512,7 +1634,7 @@ function AdminCore:handleAuthenticationRequest(player, data)
                     isAdmin = true,
                     level = permissionLevel,
                     commands = self:getAvailableCommands(player),
-                    timestamp = tick()
+                    timestamp = os.clock()
                 })
             end)
             
@@ -1524,7 +1646,7 @@ function AdminCore:handleAuthenticationRequest(player, data)
                     isAdmin = false,
                     level = 0,
                     commands = {},
-                    timestamp = tick()
+                    timestamp = os.clock()
                 })
             end)
             

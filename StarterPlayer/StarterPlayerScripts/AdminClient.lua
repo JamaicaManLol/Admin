@@ -559,7 +559,7 @@ function AdminClient:startHeartbeat()
             local success, error = pcall(function()
                 if RemoteEvents.AdminLog then
                     RemoteEvents.AdminLog:FireServer("heartbeat", {
-                        timestamp = tick(),
+                        timestamp = os.clock(),
                         adminLevel = self.adminLevel
                     })
                 end
