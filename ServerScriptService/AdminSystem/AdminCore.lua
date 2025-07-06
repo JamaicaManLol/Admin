@@ -14,7 +14,6 @@ local HttpService = game:GetService("HttpService")
 -- Load configuration and modules with unified error handling
 local Config = require(script.Parent.Config)
 local Commands = require(script.Parent.Commands)
-local SecureExecutor = require(script.Parent.SecureExecutor)
 
 -- ====================================================================
 -- ADMIN SYSTEM CORE CLASS
@@ -47,322 +46,7 @@ local function initializeDataStores()
     return true
 end
 
--- ====================================================================
--- SECURE EXECUTOR CLASS (FE COMPLIANT SYSTEM)
--- ====================================================================
-local SecureExecutor = {}
-SecureExecutor.__index = SecureExecutor
 
-function SecureExecutor.new(adminCore)
-    local self = setmetatable({}, SecureExecutor)
-    
-    self.adminCore = adminCore
-    self.executionHistory = {}
-    self.validatedScripts = {}
-    self.scriptSandbox = {}
-    
-    return self
-end
-
-function SecureExecutor:validateScript(script, scriptType)
-    local success, result = pcall(function()
-        -- Syntax validation
-        local func, syntaxError = loadstring(script)
-        if not func then
-            return {valid = false, error = "Syntax error: " .. syntaxError}
-        end
-        
-        -- Security checks for dangerous patterns
-        local dangerousPatterns = {
-            "getfenv", "setfenv", "debug%.getfenv", "debug%.setfenv",
-            "debug%.getupvalue", "debug%.setupvalue", "debug%.getlocal",
-            "debug%.setlocal", "loadstring%(.*http", "require%(.*http",
-            "game%.HttpService", "game:HttpService", "_G%[",
-            "shared%[", "getrawmetatable", "setrawmetatable"
-        }
-        
-        for _, pattern in ipairs(dangerousPatterns) do
-            if script:find(pattern) then
-                return {valid = false, error = "Security violation: Contains restricted pattern - " .. pattern}
-            end
-        end
-        
-        -- FE compliance checks
-        local clientOnlyPatterns = {
-            "UserInputService", "Mouse", "Keyboard", "Camera",
-            "StarterGui", "StarterPlayer"
-        }
-        
-        local hasClientOnly = false
-        for _, pattern in ipairs(clientOnlyPatterns) do
-            if script:find(pattern) then
-                hasClientOnly = true
-                break
-            end
-        end
-        
-        -- Script type specific validation
-        if scriptType == "NetworkScript" and hasClientOnly then
-            return {valid = false, error = "Network scripts cannot contain client-only code"}
-        end
-        
-        -- Check for require() validation
-        if scriptType == "RequireScript" then
-            if not script:find("require%s*%(") then
-                return {valid = false, error = "Require scripts must contain at least one require() call"}
-            end
-        end
-        
-        return {valid = true, error = nil, feCompliant = not hasClientOnly}
-    end)
-    
-    if not success then
-        return {valid = false, error = "Validation failed: " .. tostring(result)}
-    end
-    
-    return result
-end
-
-function SecureExecutor:executeScript(player, script, scriptType, executionData)
-    local success, result = pcall(function()
-        -- Validate execution permissions
-        if not self.adminCore:checkAdminLevel(player, 3) then
-            return {success = false, error = "Insufficient permissions for script execution"}
-        end
-        
-        -- Rate limit check
-        local rateLimitOk, rateLimitError = self.adminCore:checkRateLimit(player, "executions")
-        if not rateLimitOk then
-            return {success = false, error = rateLimitError}
-        end
-        
-        -- Validate script
-        local validation = self:validateScript(script, scriptType)
-        if not validation.valid then
-            return {success = false, error = validation.error}
-        end
-        
-        -- Log execution attempt
-        self.adminCore:logAction(player, "SCRIPT_EXECUTION", scriptType, 
-            string.format("Script length: %d characters", #script))
-        
-        -- Execute based on script type
-        local executionResult
-        if scriptType == "LuaScript" then
-            executionResult = self:executeLuaScript(player, script, executionData)
-        elseif scriptType == "RequireScript" then
-            executionResult = self:executeRequireScript(player, script, executionData)
-        elseif scriptType == "NetworkScript" then
-            executionResult = self:executeNetworkScript(player, script, executionData)
-        else
-            return {success = false, error = "Unknown script type: " .. tostring(scriptType)}
-        end
-        
-        -- Record execution history
-        table.insert(self.executionHistory, {
-            player = player.Name,
-            userId = player.UserId,
-            scriptType = scriptType,
-            timestamp = os.time(),
-            success = executionResult.success,
-            error = executionResult.error
-        })
-        
-        return executionResult
-    end)
-    
-    if not success then
-        warn("[SECURE EXECUTOR] Execution error: " .. tostring(result))
-        return {success = false, error = "Internal execution error: " .. tostring(result)}
-    end
-    
-    return result
-end
-
-function SecureExecutor:executeLuaScript(player, script, executionData)
-    local success, result = pcall(function()
-        -- Create sandbox environment
-        local sandbox = self:createSandbox(player)
-        
-        -- Compile and execute script
-        local func, compileError = loadstring(script)
-        if not func then
-            return {success = false, error = "Compilation failed: " .. compileError}
-        end
-        
-        -- Set environment
-        setfenv(func, sandbox)
-        
-        -- Execute with timeout protection
-        local executionSuccess, executionResult = pcall(func)
-        
-        if executionSuccess then
-            -- Check if FE replication is needed
-            if executionData.feCompliant then
-                self:replicateToClients(player, script, "LuaScript")
-            end
-            
-            return {success = true, result = executionResult}
-        else
-            return {success = false, error = "Runtime error: " .. tostring(executionResult)}
-        end
-    end)
-    
-    if not success then
-        return {success = false, error = "Execution error: " .. tostring(result)}
-    end
-    
-    return result
-end
-
-function SecureExecutor:executeRequireScript(player, script, executionData)
-    local success, result = pcall(function()
-        -- Create temporary ModuleScript
-        local moduleScript = Instance.new("ModuleScript")
-        moduleScript.Name = "TempExecutorModule_" .. player.UserId
-        moduleScript.Source = script
-        moduleScript.Parent = ServerStorage
-        
-        -- Execute require
-        local requireSuccess, requireResult = pcall(require, moduleScript)
-        
-        -- Clean up
-        moduleScript:Destroy()
-        
-        if requireSuccess then
-            return {success = true, result = requireResult}
-        else
-            return {success = false, error = "Require error: " .. tostring(requireResult)}
-        end
-    end)
-    
-    if not success then
-        return {success = false, error = "Module execution error: " .. tostring(result)}
-    end
-    
-    return result
-end
-
-function SecureExecutor:executeNetworkScript(player, script, executionData)
-    local success, result = pcall(function()
-        -- Network scripts must be FE compliant
-        if not executionData.feCompliant then
-            return {success = false, error = "Network scripts must be FE compliant"}
-        end
-        
-        -- Execute on server first
-        local serverResult = self:executeLuaScript(player, script, executionData)
-        
-        if serverResult.success then
-            -- Replicate to all clients
-            self:replicateToAllClients(player, script, "NetworkScript")
-            return {success = true, result = "Network script executed and replicated to all clients"}
-        else
-            return serverResult
-        end
-    end)
-    
-    if not success then
-        return {success = false, error = "Network execution error: " .. tostring(result)}
-    end
-    
-    return result
-end
-
-function SecureExecutor:createSandbox(player)
-    -- Create a safe sandbox environment
-    local sandbox = {
-        -- Safe globals
-        print = print,
-        warn = warn,
-        error = error,
-        type = type,
-        tonumber = tonumber,
-        tostring = tostring,
-        pairs = pairs,
-        ipairs = ipairs,
-        next = next,
-        
-        -- Math library
-        math = math,
-        
-        -- String library
-        string = string,
-        
-        -- Table library
-        table = table,
-        
-        -- Time functions
-        tick = tick,
-        wait = wait,
-        spawn = spawn,
-        
-        -- Game access (limited)
-        game = game,
-        workspace = workspace,
-        
-        -- Player-specific access
-        player = player,
-        
-        -- Useful instances
-        Instance = Instance,
-        Vector3 = Vector3,
-        CFrame = CFrame,
-        Color3 = Color3,
-        UDim2 = UDim2,
-        
-        -- Services (safe subset)
-        TweenService = game:GetService("TweenService"),
-        Debris = game:GetService("Debris"),
-        Lighting = game:GetService("Lighting"),
-        SoundService = game:GetService("SoundService")
-    }
-    
-    return sandbox
-end
-
-function SecureExecutor:replicateToClients(executor, script, scriptType)
-    local success, error = pcall(function()
-        -- Send to all clients with admin access
-        for _, player in ipairs(Players:GetPlayers()) do
-            if self.adminCore:checkAdminLevel(player, 1) then
-                if self.adminCore.remoteEvents.ClientReplication then
-                    self.adminCore.remoteEvents.ClientReplication:FireClient(player, {
-                        script = script,
-                        scriptType = scriptType,
-                        executor = executor.Name,
-                        timestamp = os.time()
-                    })
-                end
-            end
-        end
-    end)
-    
-    if not success then
-        warn("[SECURE EXECUTOR] Client replication error: " .. tostring(error))
-    end
-end
-
-function SecureExecutor:replicateToAllClients(executor, script, scriptType)
-    local success, error = pcall(function()
-        -- Send to ALL clients (network script)
-        for _, player in ipairs(Players:GetPlayers()) do
-            if self.adminCore.remoteEvents.ClientReplication then
-                self.adminCore.remoteEvents.ClientReplication:FireClient(player, {
-                    script = script,
-                    scriptType = scriptType,
-                    executor = executor.Name,
-                    timestamp = os.time(),
-                    networkWide = true
-                })
-            end
-        end
-    end)
-    
-    if not success then
-        warn("[SECURE EXECUTOR] Network replication error: " .. tostring(error))
-    end
-end
 
 -- ====================================================================
 -- REMOTE EVENTS MANAGEMENT (UNIFIED SYSTEM)
@@ -459,8 +143,8 @@ function AdminCore:initializeCore()
         -- Step 2: Create remote events
         self.remoteEvents = createRemoteEvents()
         
-        -- Step 3: Initialize secure executor
-        self.secureExecutor = SecureExecutor.new(self)
+        -- Step 3: Initialize secure executor (will be loaded on demand)
+        self.secureExecutor = nil
         
         -- Step 4: Load persistent data
         self:loadBanData()
@@ -937,6 +621,14 @@ function AdminCore:checkAdminLevel(player, requiredLevel)
     return playerLevel >= requiredLevel
 end
 
+function AdminCore:getSecureExecutor()
+    if not self.secureExecutor then
+        local SecureExecutor = require(script.Parent.SecureExecutor)
+        self.secureExecutor = SecureExecutor.new(self)
+    end
+    return self.secureExecutor
+end
+
 function AdminCore:getPlayerRole(player)
     local userId = player.UserId
     local adminLevel = Config.Admins[userId]
@@ -1052,7 +744,7 @@ function AdminCore:onPlayerLeaving(player)
         
         -- Clean up execution environments
         if self.secureExecutor then
-            self.secureExecutor:cleanupPlayerData(player)
+            self:getSecureExecutor():cleanupPlayerData(player)
         end
     end)
     
@@ -1639,7 +1331,7 @@ function AdminCore:connectEvents()
                 end
                 
                 -- Execute script
-                local result = self.secureExecutor:executeScript(
+                local result = self:getSecureExecutor():executeScript(
                     player, 
                     executionData.script, 
                     executionData.scriptType, 
@@ -1767,7 +1459,7 @@ function AdminCore:handleConsoleExecute(player, code, replicateToClient)
     
     -- Use secure executor for advanced script execution
     local success, result = pcall(function()
-        return self.secureExecutor:executeScript(player, code, replicateToClient)
+        return self:getSecureExecutor():executeScript(player, code, replicateToClient)
     end)
     
     if success and result then
@@ -1871,7 +1563,7 @@ end
 
 function AdminCore:executeScriptWithReplication(player, scriptCode, replicateToClient)
     local success, result = pcall(function()
-        return self.secureExecutor:executeScript(player, scriptCode, replicateToClient)
+        return self:getSecureExecutor():executeScript(player, scriptCode, replicateToClient)
     end)
     
     return success, result
@@ -1879,7 +1571,7 @@ end
 
 function AdminCore:getExecutionStats()
     local success, result = pcall(function()
-        return self.secureExecutor:getExecutionStats()
+        return self:getSecureExecutor():getExecutionStats()
     end)
     
     if success then
@@ -1891,7 +1583,7 @@ end
 
 function AdminCore:getExecutionHistory(limit)
     local success, result = pcall(function()
-        return self.secureExecutor:getExecutionHistory(limit)
+        return self:getSecureExecutor():getExecutionHistory(limit)
     end)
     
     if success then
